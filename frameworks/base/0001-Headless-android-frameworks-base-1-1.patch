@@ -1,0 +1,814 @@
+From c7f30b3d87deda178edb987ae9f951c2d5b028ae Mon Sep 17 00:00:00 2001
+From: nayobix <nayobix@nayobix.org>
+Date: Thu, 27 Oct 2016 11:31:15 +0300
+Subject: [PATCH] Headless android - frameworks/base [1/1]
+
+---
+ .../android/hardware/display/DisplayManager.java   |  2 +
+ core/java/android/view/DisplayEventReceiver.java   |  8 ++-
+ core/java/android/view/Surface.java                | 17 +++++
+ core/java/android/view/SurfaceControl.java         | 22 ++++--
+ core/java/android/view/SurfaceSession.java         |  5 +-
+ core/jni/android_view_GraphicBuffer.cpp            | 16 ++++-
+ .../android/server/am/ActivityManagerService.java  | 27 +++++++-
+ .../android/server/am/ActivityStackSupervisor.java |  6 +-
+ .../server/display/DisplayManagerService.java      | 14 +++-
+ .../server/display/DisplayPowerController.java     | 14 +++-
+ .../server/display/HeadlessDisplayAdapter.java     | 79 ++++++++++++++++++++++
+ .../android/server/policy/PhoneWindowManager.java  | 21 +++++-
+ .../android/server/power/PowerManagerService.java  |  4 +-
+ .../android/server/wm/WindowManagerService.java    | 27 +++++++-
+ services/java/com/android/server/SystemServer.java | 16 +++--
+ 15 files changed, 249 insertions(+), 29 deletions(-)
+ create mode 100644 services/core/java/com/android/server/display/HeadlessDisplayAdapter.java
+
+diff --git a/core/java/android/hardware/display/DisplayManager.java b/core/java/android/hardware/display/DisplayManager.java
+index 12e1963..c4074c5 100644
+--- a/core/java/android/hardware/display/DisplayManager.java
++++ b/core/java/android/hardware/display/DisplayManager.java
+@@ -24,6 +24,7 @@ import android.os.Handler;
+ import android.util.SparseArray;
+ import android.view.Display;
+ import android.view.Surface;
++import android.os.SystemProperties;
+ 
+ import java.util.ArrayList;
+ 
+@@ -42,6 +43,7 @@ public final class DisplayManager {
+ 
+     private final Context mContext;
+     private final DisplayManagerGlobal mGlobal;
++    private final boolean mHeadless = "1".equals(SystemProperties.get("ro.config.headless", "0"));
+ 
+     private final Object mLock = new Object();
+     private final SparseArray<Display> mDisplays = new SparseArray<Display>();
+diff --git a/core/java/android/view/DisplayEventReceiver.java b/core/java/android/view/DisplayEventReceiver.java
+index 5a9a1ea..42f2a32 100644
+--- a/core/java/android/view/DisplayEventReceiver.java
++++ b/core/java/android/view/DisplayEventReceiver.java
+@@ -22,6 +22,8 @@ import android.os.Looper;
+ import android.os.MessageQueue;
+ import android.util.Log;
+ 
++import android.os.SystemProperties;
++
+ import java.lang.ref.WeakReference;
+ 
+ /**
+@@ -49,6 +51,8 @@ public abstract class DisplayEventReceiver {
+     private static native void nativeDispose(long receiverPtr);
+     private static native void nativeScheduleVsync(long receiverPtr);
+ 
++    private boolean mHeadless = "1".equals(SystemProperties.get("ro.config.headless", "0"));
++
+     /**
+      * Creates a display event receiver.
+      *
+@@ -60,7 +64,9 @@ public abstract class DisplayEventReceiver {
+         }
+ 
+         mMessageQueue = looper.getQueue();
+-        mReceiverPtr = nativeInit(new WeakReference<DisplayEventReceiver>(this), mMessageQueue);
++
++         if (!mHeadless)
++            mReceiverPtr = nativeInit(new WeakReference<DisplayEventReceiver>(this), mMessageQueue);
+ 
+         mCloseGuard.open("dispose");
+     }
+diff --git a/core/java/android/view/Surface.java b/core/java/android/view/Surface.java
+index 7da849a..1c20f01 100644
+--- a/core/java/android/view/Surface.java
++++ b/core/java/android/view/Surface.java
+@@ -24,6 +24,7 @@ import android.graphics.Rect;
+ import android.graphics.SurfaceTexture;
+ import android.os.Parcel;
+ import android.os.Parcelable;
++import android.os.SystemProperties;
+ import android.util.Log;
+ 
+ import java.lang.annotation.Retention;
+@@ -59,6 +60,15 @@ public class Surface implements Parcelable {
+     private static native long nativeGetNextFrameNumber(long nativeObject);
+     private static native int nativeSetScalingMode(long nativeObject, int scalingMode);
+ 
++    private static final boolean headless = "1".equals(
++					SystemProperties.get("ro.config.headless", "0"));
++
++    private static void checkHeadless() {
++        if(headless) {
++            throw new UnsupportedOperationException("Device is headless");
++        }
++    }
++
+     public static final Parcelable.Creator<Surface> CREATOR =
+             new Parcelable.Creator<Surface>() {
+         @Override
+@@ -158,6 +168,8 @@ public class Surface implements Parcelable {
+             throw new IllegalArgumentException("surfaceTexture must not be null");
+         }
+ 
++        checkHeadless();
++
+         synchronized (mLock) {
+             mName = surfaceTexture.toString();
+             setNativeObjectLocked(nativeCreateFromSurfaceTexture(surfaceTexture));
+@@ -166,6 +178,9 @@ public class Surface implements Parcelable {
+ 
+     /* called from android_view_Surface_createFromIGraphicBufferProducer() */
+     private Surface(long nativeObject) {
++
++        checkHeadless();
++
+         synchronized (mLock) {
+             setNativeObjectLocked(nativeObject);
+         }
+@@ -451,6 +466,8 @@ public class Surface implements Parcelable {
+             throw new IllegalArgumentException("source must not be null");
+         }
+ 
++        checkHeadless();
++
+         synchronized (mLock) {
+             // nativeReadFromParcel() will either return mNativeObject, or
+             // create a new native Surface and return it after reducing
+diff --git a/core/java/android/view/SurfaceControl.java b/core/java/android/view/SurfaceControl.java
+index 415e70c..237aff4 100644
+--- a/core/java/android/view/SurfaceControl.java
++++ b/core/java/android/view/SurfaceControl.java
+@@ -21,6 +21,7 @@ import android.graphics.Bitmap;
+ import android.graphics.Rect;
+ import android.graphics.Region;
+ import android.os.IBinder;
++import android.os.SystemProperties;
+ import android.util.Log;
+ import android.view.Surface.OutOfResourcesException;
+ 
+@@ -96,6 +97,9 @@ public class SurfaceControl {
+     private final String mName;
+     long mNativeObject; // package visibility only for Surface.java access
+ 
++    private static final boolean HEADLESS = "1".equals(
++            SystemProperties.get("ro.config.headless", "0"));
++
+     /* flags used in constructor (keep in sync with ISurfaceComposerClient.h) */
+ 
+     /**
+@@ -292,6 +296,8 @@ public class SurfaceControl {
+                     new Throwable());
+         }
+ 
++        checkHeadless();
++
+         mName = name;
+         mNativeObject = nativeCreate(session, name, w, h, format, flags);
+         if (mNativeObject == 0) {
+@@ -302,6 +308,12 @@ public class SurfaceControl {
+         mCloseGuard.open("release");
+     }
+ 
++    private static void checkHeadless() {
++        if (HEADLESS) {
++            throw new UnsupportedOperationException("Device is headless");
++        }
++    }
++
+     @Override
+     protected void finalize() throws Throwable {
+         try {
+@@ -341,7 +353,7 @@ public class SurfaceControl {
+      */
+     public void destroy() {
+         if (mNativeObject != 0) {
+-            nativeDestroy(mNativeObject);
++            if (!HEADLESS) nativeDestroy(mNativeObject);
+             mNativeObject = 0;
+         }
+         mCloseGuard.close();
+@@ -351,7 +363,7 @@ public class SurfaceControl {
+      * Disconnect any client still connected to the surface.
+      */
+     public void disconnect() {
+-        if (mNativeObject != 0) {
++        if (mNativeObject != 0 && !HEADLESS) {
+             nativeDisconnect(mNativeObject);
+         }
+     }
+@@ -368,16 +380,16 @@ public class SurfaceControl {
+ 
+     /** start a transaction */
+     public static void openTransaction() {
+-        nativeOpenTransaction();
++        if (!HEADLESS) nativeOpenTransaction();
+     }
+ 
+     /** end a transaction */
+     public static void closeTransaction() {
+-        nativeCloseTransaction(false);
++        if (!HEADLESS) nativeCloseTransaction(false);
+     }
+ 
+     public static void closeTransactionSync() {
+-        nativeCloseTransaction(true);
++        if (!HEADLESS) nativeCloseTransaction(true);
+     }
+ 
+     public void deferTransactionUntil(IBinder handle, long frame) {
+diff --git a/core/java/android/view/SurfaceSession.java b/core/java/android/view/SurfaceSession.java
+index 3cf5af4..70db15d 100644
+--- a/core/java/android/view/SurfaceSession.java
++++ b/core/java/android/view/SurfaceSession.java
+@@ -16,6 +16,8 @@
+ 
+ package android.view;
+ 
++import android.os.SystemProperties;
++
+ /**
+  * An instance of this class represents a connection to the surface
+  * flinger, from which you can create one or more Surface instances that will
+@@ -29,10 +31,11 @@ public final class SurfaceSession {
+     private static native long nativeCreate();
+     private static native void nativeDestroy(long ptr);
+     private static native void nativeKill(long ptr);
++    private boolean mHeadless = "1".equals(SystemProperties.get("ro.config.headless", "0"));
+ 
+     /** Create a new connection with the surface flinger. */
+     public SurfaceSession() {
+-        mNativeClient = nativeCreate();
++        if (!mHeadless) mNativeClient = nativeCreate();
+     }
+ 
+     /* no user serviceable parts here ... */
+diff --git a/core/jni/android_view_GraphicBuffer.cpp b/core/jni/android_view_GraphicBuffer.cpp
+index 7682dd6..002d100 100644
+--- a/core/jni/android_view_GraphicBuffer.cpp
++++ b/core/jni/android_view_GraphicBuffer.cpp
+@@ -33,6 +33,9 @@
+ #include <gui/IGraphicBufferAlloc.h>
+ #include <gui/ISurfaceComposer.h>
+ 
++#include <gui/GraphicBufferAlloc.h>
++#include <cutils/properties.h>
++
+ #include <SkCanvas.h>
+ #include <SkBitmap.h>
+ 
+@@ -101,8 +104,17 @@ public:
+ static jlong android_view_GraphiceBuffer_create(JNIEnv* env, jobject clazz,
+         jint width, jint height, jint format, jint usage) {
+ 
+-    sp<ISurfaceComposer> composer(ComposerService::getComposerService());
+-    sp<IGraphicBufferAlloc> alloc(composer->createGraphicBufferAlloc());
++    sp<IGraphicBufferAlloc> alloc;
++    // Run time check for headless, where we also allocate in-process.
++    char value[PROPERTY_VALUE_MAX];
++    property_get("ro.config.headless", value, "0");
++    if (atoi(value) == 1) {
++        alloc = new GraphicBufferAlloc();
++    } else {
++        sp<ISurfaceComposer> composer(ComposerService::getComposerService());
++        alloc = composer->createGraphicBufferAlloc();
++    }
++
+     if (alloc == NULL) {
+         if (kDebugGraphicBuffer) {
+             ALOGW("createGraphicBufferAlloc() failed in GraphicBuffer.create()");
+diff --git a/services/core/java/com/android/server/am/ActivityManagerService.java b/services/core/java/com/android/server/am/ActivityManagerService.java
+index c124e5d..0b33b44 100644
+--- a/services/core/java/com/android/server/am/ActivityManagerService.java
++++ b/services/core/java/com/android/server/am/ActivityManagerService.java
+@@ -562,6 +562,8 @@ public final class ActivityManagerService extends ActivityManagerNative
+ 
+     public IntentFirewall mIntentFirewall;
+ 
++    private final boolean mHeadless;
++
+     // Whether we should show our dialogs (ANR, crash, etc) or just perform their
+     // default actuion automatically.  Important for devices without direct input
+     // devices.
+@@ -1591,11 +1593,11 @@ public final class ActivityManagerService extends ActivityManagerNative
+         public void handleMessage(Message msg) {
+             switch (msg.what) {
+             case SHOW_ERROR_UI_MSG: {
+-                mAppErrors.handleShowAppErrorUi(msg);
++                if (!mHeadless) mAppErrors.handleShowAppErrorUi(msg);
+                 ensureBootCompleted();
+             } break;
+             case SHOW_NOT_RESPONDING_UI_MSG: {
+-                mAppErrors.handleShowAnrUi(msg);
++                if (!mHeadless) mAppErrors.handleShowAnrUi(msg);
+                 ensureBootCompleted();
+             } break;
+             case SHOW_STRICT_MODE_VIOLATION_UI_MSG: {
+@@ -2637,6 +2639,8 @@ public final class ActivityManagerService extends ActivityManagerNative
+ 
+         mGrantFile = new AtomicFile(new File(systemDir, "urigrants.xml"));
+ 
++		mHeadless = "1".equals(SystemProperties.get("ro.config.headless", "0"));
++
+         mUserController = new UserController(this);
+ 
+         GL_ES_VERSION = SystemProperties.getInt("ro.opengles.version",
+@@ -3854,6 +3858,13 @@ public final class ActivityManagerService extends ActivityManagerNative
+     }
+ 
+     boolean startHomeActivityLocked(int userId, String reason) {
++        if (mHeadless) {
++            // Added because none of the other calls to ensureBootCompleted seem to fire
++            // when running headless.
++            ensureBootCompleted();
++            return false;
++        }
++
+         if (mFactoryTest == FactoryTest.FACTORY_TEST_LOW_LEVEL
+                 && mTopAction == null) {
+             // We are running in factory test mode, but unable to find
+@@ -4886,6 +4897,10 @@ public final class ActivityManagerService extends ActivityManagerNative
+         }
+ 
+         synchronized(this) {
++            if (mHeadless) {
++                Log.e(TAG, "handleAppCrashLocked: " + packageName);
++                return;
++            }
+             mAppErrors.scheduleAppCrashLocked(uid, initialPid, packageName, message);
+         }
+     }
+@@ -6537,7 +6552,7 @@ public final class ActivityManagerService extends ActivityManagerNative
+         // See if the top visible activity is waiting to run in this process...
+         if (normalMode) {
+             try {
+-                if (mStackSupervisor.attachApplicationLocked(app)) {
++                if (mStackSupervisor.attachApplicationLocked(app, mHeadless)) {
+                     didSomething = true;
+                 }
+             } catch (Exception e) {
+@@ -18647,6 +18662,9 @@ public final class ActivityManagerService extends ActivityManagerNative
+     }
+ 
+     void updateUserConfigurationLocked() {
++
++        if (mHeadless) return;
++
+         Configuration configuration = new Configuration(mConfiguration);
+         Settings.System.adjustConfigurationForUser(mContext.getContentResolver(), configuration,
+                 mUserController.getCurrentUserIdLocked(), Settings.System.canWrite(mContext));
+@@ -18675,6 +18693,9 @@ public final class ActivityManagerService extends ActivityManagerNative
+      */
+     private boolean updateConfigurationLocked(Configuration values,
+             ActivityRecord starting, boolean initLocale, boolean persistent, int userId) {
++
++        if (mHeadless) return true;
++
+         int changes = 0;
+ 
+         if (mWindowManager != null) {
+diff --git a/services/core/java/com/android/server/am/ActivityStackSupervisor.java b/services/core/java/com/android/server/am/ActivityStackSupervisor.java
+index 36207c4..11c001f 100644
+--- a/services/core/java/com/android/server/am/ActivityStackSupervisor.java
++++ b/services/core/java/com/android/server/am/ActivityStackSupervisor.java
+@@ -822,7 +822,7 @@ public final class ActivityStackSupervisor implements DisplayListener {
+         return resumedActivity;
+     }
+ 
+-    boolean attachApplicationLocked(ProcessRecord app) throws RemoteException {
++    boolean attachApplicationLocked(ProcessRecord app, boolean headless) throws RemoteException {
+         final String processName = app.processName;
+         boolean didSomething = false;
+         for (int displayNdx = mActivityDisplays.size() - 1; displayNdx >= 0; --displayNdx) {
+@@ -837,7 +837,9 @@ public final class ActivityStackSupervisor implements DisplayListener {
+                     if (hr.app == null && app.uid == hr.info.applicationInfo.uid
+                             && processName.equals(hr.processName)) {
+                         try {
+-                            if (realStartActivityLocked(hr, app, true, true)) {
++                            if (headless) {
++                                Slog.e(TAG, "Starting activities not supported on headless device: " + hr);
++                            } else if (realStartActivityLocked(hr, app, true, true)) {
+                                 didSomething = true;
+                             }
+                         } catch (RemoteException e) {
+diff --git a/services/core/java/com/android/server/display/DisplayManagerService.java b/services/core/java/com/android/server/display/DisplayManagerService.java
+index 6a6570b..8383272 100644
+--- a/services/core/java/com/android/server/display/DisplayManagerService.java
++++ b/services/core/java/com/android/server/display/DisplayManagerService.java
+@@ -119,6 +119,7 @@ public final class DisplayManagerService extends SystemService {
+     // Otherwise WFD is enabled according to the value of config_enableWifiDisplay.
+     private static final String FORCE_WIFI_DISPLAY_ENABLE = "persist.debug.wfd.enable";
+ 
++    private static final String SYSTEM_HEADLESS = "ro.config.headless";
+     private static final long WAIT_FOR_DEFAULT_DISPLAY_TIMEOUT = 10000;
+ 
+     private static final int MSG_REGISTER_DEFAULT_DISPLAY_ADAPTER = 1;
+@@ -128,6 +129,7 @@ public final class DisplayManagerService extends SystemService {
+     private static final int MSG_UPDATE_VIEWPORT = 5;
+ 
+     private final Context mContext;
++    private final boolean mHeadless;
+     private final DisplayManagerHandler mHandler;
+     private final Handler mUiHandler;
+     private final DisplayAdapterListener mDisplayAdapterListener;
+@@ -228,6 +230,7 @@ public final class DisplayManagerService extends SystemService {
+     public DisplayManagerService(Context context) {
+         super(context);
+         mContext = context;
++	mHeadless = "1".equals(SystemProperties.get(SYSTEM_HEADLESS, "0"));
+         mHandler = new DisplayManagerHandler(DisplayThread.get().getLooper());
+         mUiHandler = UiThread.getHandler();
+         mDisplayAdapterListener = new DisplayAdapterListener();
+@@ -621,8 +624,13 @@ public final class DisplayManagerService extends SystemService {
+     private void registerDefaultDisplayAdapter() {
+         // Register default display adapter.
+         synchronized (mSyncRoot) {
+-            registerDisplayAdapterLocked(new LocalDisplayAdapter(
+-                    mSyncRoot, mContext, mHandler, mDisplayAdapterListener));
++            if (mHeadless) {
++                registerDisplayAdapterLocked(new HeadlessDisplayAdapter(
++                            mSyncRoot, mContext, mHandler, mDisplayAdapterListener));
++            } else {
++                registerDisplayAdapterLocked(new LocalDisplayAdapter(
++                            mSyncRoot, mContext, mHandler, mDisplayAdapterListener));
++            }
+         }
+     }
+ 
+@@ -1018,6 +1026,7 @@ public final class DisplayManagerService extends SystemService {
+         pw.println("DISPLAY MANAGER (dumpsys display)");
+ 
+         synchronized (mSyncRoot) {
++            pw.println("  mHeadless=" + mHeadless);
+             pw.println("  mOnlyCode=" + mOnlyCore);
+             pw.println("  mSafeMode=" + mSafeMode);
+             pw.println("  mPendingTraversal=" + mPendingTraversal);
+@@ -1173,6 +1182,7 @@ public final class DisplayManagerService extends SystemService {
+     }
+ 
+     private final class BinderService extends IDisplayManager.Stub {
++
+         /**
+          * Returns information about the specified logical display.
+          *
+diff --git a/services/core/java/com/android/server/display/DisplayPowerController.java b/services/core/java/com/android/server/display/DisplayPowerController.java
+index 8f8afd5..e5d5845 100644
+--- a/services/core/java/com/android/server/display/DisplayPowerController.java
++++ b/services/core/java/com/android/server/display/DisplayPowerController.java
+@@ -43,6 +43,7 @@ import android.util.Spline;
+ import android.util.TimeUtils;
+ import android.view.Display;
+ import android.view.WindowManagerPolicy;
++import android.os.SystemProperties;
+ 
+ import java.io.PrintWriter;
+ 
+@@ -254,6 +255,8 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
+     private ObjectAnimator mColorFadeOffAnimator;
+     private RampAnimator<DisplayPowerState> mScreenBrightnessRampAnimator;
+ 
++    private boolean mHeadless = "1".equals(SystemProperties.get("ro.config.headless", "0"));
++
+     /**
+      * Creates the display power controller.
+      */
+@@ -504,6 +507,9 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
+     };
+ 
+     private void updatePowerState() {
++
++        if (mHeadless) return;
++
+         // Update the power state request.
+         final boolean mustNotify;
+         boolean mustInitialize = false;
+@@ -1114,6 +1120,7 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
+     private void dumpLocal(PrintWriter pw) {
+         pw.println();
+         pw.println("Display Power Controller Thread State:");
++        pw.println("  mHeadless=" + mHeadless);
+         pw.println("  mPowerRequest=" + mPowerRequest);
+         pw.println("  mWaitingForNegativeProximity=" + mWaitingForNegativeProximity);
+ 
+@@ -1132,8 +1139,11 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
+         pw.println("  mPendingScreenOff=" + mPendingScreenOff);
+         pw.println("  mReportedToPolicy=" + reportedToPolicyToString(mReportedScreenStateToPolicy));
+ 
+-        pw.println("  mScreenBrightnessRampAnimator.isAnimating()=" +
+-                mScreenBrightnessRampAnimator.isAnimating());
++        if (!mHeadless)
++            pw.println("  mScreenBrightnessRampAnimator.isAnimating()=" +
++                    mScreenBrightnessRampAnimator.isAnimating());
++        else
++            pw.println("  mScreenBrightnessRampAnimator.isAnimating()=false");
+ 
+         if (mColorFadeOnAnimator != null) {
+             pw.println("  mColorFadeOnAnimator.isStarted()=" +
+diff --git a/services/core/java/com/android/server/display/HeadlessDisplayAdapter.java b/services/core/java/com/android/server/display/HeadlessDisplayAdapter.java
+new file mode 100644
+index 0000000..57b489f
+--- /dev/null
++++ b/services/core/java/com/android/server/display/HeadlessDisplayAdapter.java
+@@ -0,0 +1,79 @@
++/*
++ * Copyright (C) 2012 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.display;
++
++import android.content.Context;
++import android.os.Handler;
++import android.util.DisplayMetrics;
++import android.view.Display;
++
++/**
++ * Provides a fake default display for headless systems.
++ * <p>
++ * Display adapters are guarded by the {@link DisplayManagerService.SyncRoot} lock.
++ * </p>
++ */
++final class HeadlessDisplayAdapter extends DisplayAdapter {
++    private static final String TAG = "HeadlessDisplayAdapter";
++	private Display.Mode mMode;
++	private static final String UNIQUE_ID_PREFIX = "headless:";
++
++    // Called with SyncRoot lock held.
++    public HeadlessDisplayAdapter(DisplayManagerService.SyncRoot syncRoot,
++            Context context, Handler handler, Listener listener) {
++        super(syncRoot, context, handler, listener, TAG);
++    }
++
++    @Override
++    public void registerLocked() {
++        super.registerLocked();
++        sendDisplayDeviceEventLocked(new HeadlessDisplayDevice(), DISPLAY_DEVICE_EVENT_ADDED);
++    }
++
++    private final class HeadlessDisplayDevice extends DisplayDevice {
++        private DisplayDeviceInfo mInfo;
++
++        public HeadlessDisplayDevice() {
++            super(HeadlessDisplayAdapter.this, null, "HeadlessDisplayAdapter");
++        }
++
++        @Override
++        public DisplayDeviceInfo getDisplayDeviceInfoLocked() {
++            if (mInfo == null) {
++                mInfo = new DisplayDeviceInfo();
++                mInfo.name = getContext().getResources().getString(
++                        com.android.internal.R.string.display_manager_built_in_display_name);
++                mInfo.width = 640;
++                mInfo.height = 480;
++                //mInfo.refreshRate = 60;
++				mMode = createMode(640, 480, 60.0f);
++				mInfo.supportedModes = new Display.Mode[] { mMode };
++				mInfo.modeId = mMode.getModeId();
++				mInfo.defaultModeId = mMode.getModeId();
++                mInfo.densityDpi = DisplayMetrics.DENSITY_DEFAULT;
++                mInfo.xDpi = 160;
++                mInfo.yDpi = 160;
++                mInfo.flags = DisplayDeviceInfo.FLAG_DEFAULT_DISPLAY
++                        | DisplayDeviceInfo.FLAG_SECURE
++                        | DisplayDeviceInfo.FLAG_SUPPORTS_PROTECTED_BUFFERS;
++                mInfo.type = Display.TYPE_BUILT_IN;
++                mInfo.touch = DisplayDeviceInfo.TOUCH_NONE;
++            }
++            return mInfo;
++        }
++    }
++}
+diff --git a/services/core/java/com/android/server/policy/PhoneWindowManager.java b/services/core/java/com/android/server/policy/PhoneWindowManager.java
+index a4408fc..ec8209f 100644
+--- a/services/core/java/com/android/server/policy/PhoneWindowManager.java
++++ b/services/core/java/com/android/server/policy/PhoneWindowManager.java
+@@ -349,6 +349,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
+     /** If true, hitting shift & menu will broadcast Intent.ACTION_BUG_REPORT */
+     boolean mEnableShiftMenuBugReports = false;
+ 
++    boolean mHeadless;
++
+     boolean mSafeMode;
+     WindowState mStatusBar = null;
+     int mStatusBarHeight;
+@@ -1505,6 +1507,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
+         mContext = context;
+         mWindowManager = windowManager;
+         mWindowManagerFuncs = windowManagerFuncs;
++        mHeadless = "1".equals(SystemProperties.get("ro.config.headless", "0"));
+         mWindowManagerInternal = LocalServices.getService(WindowManagerInternal.class);
+         mActivityManagerInternal = LocalServices.getService(ActivityManagerInternal.class);
+         mInputManagerInternal = LocalServices.getService(InputManagerInternal.class);
+@@ -5263,6 +5266,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
+     /** {@inheritDoc} */
+     @Override
+     public void notifyLidSwitchChanged(long whenNanos, boolean lidOpen) {
++
++        if (mHeadless) return;
++
+         // lid changed state
+         final int newLidState = lidOpen ? LID_OPEN : LID_CLOSED;
+         if (newLidState == mLidState) {
+@@ -5471,7 +5477,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
+         int result;
+         boolean isWakeKey = (policyFlags & WindowManagerPolicy.FLAG_WAKE) != 0
+                 || event.isWakeKey();
+-        if (interactive || (isInjected && !isWakeKey)) {
++        if ((interactive && !mHeadless ) || (isInjected && !isWakeKey)) {
+             // When the device is interactive or the key is injected pass the
+             // key to the application.
+             result = ACTION_PASS_TO_USER;
+@@ -6707,8 +6713,11 @@ public class PhoneWindowManager implements WindowManagerPolicy {
+     /** {@inheritDoc} */
+     @Override
+     public void systemReady() {
+-        mKeyguardDelegate = new KeyguardServiceDelegate(mContext);
+-        mKeyguardDelegate.onSystemReady();
++
++        if (!mHeadless) {
++            mKeyguardDelegate = new KeyguardServiceDelegate(mContext);
++            mKeyguardDelegate.onSystemReady();
++        }
+ 
+         readCameraLensCoverState();
+         updateUiMode();
+@@ -6770,6 +6779,12 @@ public class PhoneWindowManager implements WindowManagerPolicy {
+     /** {@inheritDoc} */
+     @Override
+     public void showBootMessage(final CharSequence msg, final boolean always) {
++
++        if (mHeadless) {
++            Log.v(TAG, "showBootMessage: on headless");
++            return;
++        }
++
+         mHandler.post(new Runnable() {
+             @Override public void run() {
+                 if (mBootMsgDialog == null) {
+diff --git a/services/core/java/com/android/server/power/PowerManagerService.java b/services/core/java/com/android/server/power/PowerManagerService.java
+index 12a2d2e..b996c4b 100644
+--- a/services/core/java/com/android/server/power/PowerManagerService.java
++++ b/services/core/java/com/android/server/power/PowerManagerService.java
+@@ -272,6 +272,8 @@ public final class PowerManagerService extends SystemService
+     // True if boot completed occurred.  We keep the screen on until this happens.
+     private boolean mBootCompleted;
+ 
++    private boolean mHeadless = "1".equals(SystemProperties.get("ro.config.headless", "0"));
++
+     // Runnables that should be triggered on boot completed
+     private Runnable[] mBootCompletedRunnables;
+ 
+@@ -1317,7 +1319,7 @@ public final class PowerManagerService extends SystemService
+             mWakefulness = wakefulness;
+             mWakefulnessChanging = true;
+             mDirty |= DIRTY_WAKEFULNESS;
+-            mNotifier.onWakefulnessChangeStarted(wakefulness, reason);
++            if (!mHeadless) mNotifier.onWakefulnessChangeStarted(wakefulness, reason);
+         }
+     }
+ 
+diff --git a/services/core/java/com/android/server/wm/WindowManagerService.java b/services/core/java/com/android/server/wm/WindowManagerService.java
+index 3687512..c282eaf 100644
+--- a/services/core/java/com/android/server/wm/WindowManagerService.java
++++ b/services/core/java/com/android/server/wm/WindowManagerService.java
+@@ -347,6 +347,7 @@ public class WindowManagerService extends IWindowManager.Stub
+     private static final int ANIMATION_DURATION_SCALE = 2;
+ 
+     final private KeyguardDisableHandler mKeyguardDisableHandler;
++    private final boolean mHeadless = "1".equals(SystemProperties.get("ro.config.headless", "0"));;
+ 
+     final BroadcastReceiver mBroadcastReceiver = new BroadcastReceiver() {
+         @Override
+@@ -5778,7 +5779,7 @@ public class WindowManagerService extends IWindowManager.Stub
+ 
+     public void performBootTimeout() {
+         synchronized(mWindowMap) {
+-            if (mDisplayEnabled) {
++            if (mDisplayEnabled || mHeadless) {
+                 return;
+             }
+             Slog.w(TAG_WM, "***** BOOT TIMEOUT: forcing display enabled");
+@@ -5851,6 +5852,19 @@ public class WindowManagerService extends IWindowManager.Stub
+                     + " mSystemBooted=" + mSystemBooted
+                     + " mOnlyCore=" + mOnlyCore,
+                     new RuntimeException("here").fillInStackTrace());
++
++            if (mHeadless) {
++                mDisplayEnabled = true;
++                mBootAnimationStopped = true;
++                try {
++                    mActivityManager.bootAnimationComplete();
++                } catch (RemoteException e) {
++                }
++                mPolicy.enableScreenAfterBoot();
++                Slog.e(TAG_WM, "headless performEnableScreen!");
++                return;
++            }
++
+             if (mDisplayEnabled) {
+                 return;
+             }
+@@ -6066,6 +6080,9 @@ public class WindowManagerService extends IWindowManager.Stub
+     // only allow disables from pids which have count on, etc.
+     @Override
+     public void showStrictModeViolation(boolean on) {
++
++        if (mHeadless) return;
++
+         int pid = Binder.getCallingPid();
+         mH.sendMessage(mH.obtainMessage(H.SHOW_STRICT_MODE_VIOLATION, on ? 1 : 0, pid));
+     }
+@@ -7882,6 +7899,12 @@ public class WindowManagerService extends IWindowManager.Stub
+     }
+ 
+     public void displayReady() {
++
++        if (mHeadless) {
++            Slog.e(TAG_WM, "headless displayReady!");
++            return;
++        }
++
+         for (Display display : mDisplays) {
+             displayReady(display.getDisplayId());
+         }
+@@ -9446,7 +9469,7 @@ public class WindowManagerService extends IWindowManager.Stub
+ 
+     /** Note that Locked in this case is on mLayoutToAnim */
+     void scheduleAnimationLocked() {
+-        if (!mAnimationScheduled) {
++        if (!mAnimationScheduled && !mHeadless) {
+             mAnimationScheduled = true;
+             mChoreographer.postFrameCallback(mAnimator.mAnimationFrameCallback);
+         }
+diff --git a/services/java/com/android/server/SystemServer.java b/services/java/com/android/server/SystemServer.java
+index f59b2ff..af24e7d 100644
+--- a/services/java/com/android/server/SystemServer.java
++++ b/services/java/com/android/server/SystemServer.java
+@@ -109,6 +109,8 @@ import java.util.TimerTask;
+ public final class SystemServer {
+     private static final String TAG = "SystemServer";
+ 
++    final boolean headless = "1".equals(SystemProperties.get("ro.config.headless", "0"));
++
+     private static final String ENCRYPTING_STATE = "trigger_restart_min_framework";
+     private static final String ENCRYPTED_STATE = "1";
+ 
+@@ -619,7 +621,7 @@ public final class SystemServer {
+             mActivityManagerService.setWindowManager(wm);
+ 
+             inputManager.setWindowManagerCallbacks(wm.getInputMonitor());
+-            inputManager.start();
++            if (!headless) inputManager.start();
+ 
+             // TODO: Use service dependencies instead.
+             mDisplayManagerService.windowManagerAndInputReady();
+@@ -662,7 +664,7 @@ public final class SystemServer {
+ 
+         // Bring up services needed for UI.
+         if (mFactoryTestMode != FactoryTest.FACTORY_TEST_LOW_LEVEL) {
+-            mSystemServiceManager.startService(InputMethodManagerService.Lifecycle.class);
++            if (!headless) mSystemServiceManager.startService(InputMethodManagerService.Lifecycle.class);
+ 
+             traceBeginAndSlog("StartAccessibilityManagerService");
+             try {
+@@ -931,7 +933,9 @@ public final class SystemServer {
+             if (!disableNonCoreServices && context.getResources().getBoolean(
+                         R.bool.config_enableWallpaperService)) {
+                 traceBeginAndSlog("StartWallpaperManagerService");
+-                mSystemServiceManager.startService(WALLPAPER_SERVICE_CLASS);
++                if (!headless) {
++                    mSystemServiceManager.startService(WALLPAPER_SERVICE_CLASS);
++                }
+                 Trace.traceEnd(Trace.TRACE_TAG_SYSTEM_SERVER);
+             }
+ 
+@@ -1164,7 +1168,7 @@ public final class SystemServer {
+ 
+         // Before things start rolling, be sure we have decided whether
+         // we are in safe mode.
+-        final boolean safeMode = wm.detectSafeMode();
++        final boolean safeMode = !headless ? wm.detectSafeMode() : false;
+         if (safeMode) {
+             mActivityManagerService.enterSafeMode();
+             // Disable the JIT for the system_server process
+@@ -1302,7 +1306,9 @@ public final class SystemServer {
+ 
+                 Trace.traceBegin(Trace.TRACE_TAG_SYSTEM_SERVER, "StartSystemUI");
+                 try {
+-                    startSystemUi(context);
++                    if (!headless) {
++                        startSystemUi(context);
++                    }
+                 } catch (Throwable e) {
+                     reportWtf("starting System UI", e);
+                 }
+-- 
+2.7.4
+

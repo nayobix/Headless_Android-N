@@ -1,0 +1,43 @@
+From 9199715dd2e4f36a6c776dcae20524281277220c Mon Sep 17 00:00:00 2001
+From: nayobix <nayobix@nayobix.org>
+Date: Fri, 28 Oct 2016 15:56:26 +0300
+Subject: [PATCH 2/2] Headless Android - frameworks/native [2/2]
+
+Remove annoying ..Waiting for service surfaceflinger.. message
+
+Without this patch there are infinite messages:
+Waiting for service surfaceflinger
+---
+ libs/gui/SurfaceComposerClient.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/libs/gui/SurfaceComposerClient.cpp b/libs/gui/SurfaceComposerClient.cpp
+index 92ae41e..aabae25 100644
+--- a/libs/gui/SurfaceComposerClient.cpp
++++ b/libs/gui/SurfaceComposerClient.cpp
+@@ -40,6 +40,8 @@
+ #include <private/gui/ComposerService.h>
+ #include <private/gui/LayerState.h>
+ 
++#include <cutils/properties.h>
++
+ namespace android {
+ // ---------------------------------------------------------------------------
+ 
+@@ -52,6 +54,13 @@ ComposerService::ComposerService()
+ }
+ 
+ void ComposerService::connectLocked() {
++   // Run time check for headless
++   char value[PROPERTY_VALUE_MAX];
++   property_get("ro.config.headless", value, "0");
++   if (atoi(value) == 1) {
++      return;
++   }
++
+     const String16 name("SurfaceFlinger");
+     while (getService(name, &mComposerService) != NO_ERROR) {
+         usleep(250000);
+-- 
+2.7.4
+

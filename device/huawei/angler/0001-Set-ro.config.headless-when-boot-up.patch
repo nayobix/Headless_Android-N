@@ -1,0 +1,24 @@
+From 1eb6be4f26b9c130f02206aa656d9f3a4e6d9d1c Mon Sep 17 00:00:00 2001
+From: nayobix <nayobix@nayobix.org>
+Date: Tue, 1 Nov 2016 12:41:12 +0200
+Subject: [PATCH] Set ro.config.headless when boot up
+
+---
+ init.angler.rc | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/init.angler.rc b/init.angler.rc
+index a928ffd..c4a0625 100755
+--- a/init.angler.rc
++++ b/init.angler.rc
+@@ -109,6 +109,7 @@ on boot
+     chmod 2770 /dev/socket/qmux_gps
+ 
+     setprop wifi.interface wlan0
++    setprop ro.config.headless 1
+ 
+     #wifi sar
+     chown radio radio /sys/module/wifi_sar/parameters/wifi_tx_power_limit
+-- 
+2.7.4
+

@@ -1,0 +1,106 @@
+From 3955d03ff4ccfa40f564dba5b2cd87472fbe5f0d Mon Sep 17 00:00:00 2001
+From: nayobix <nayobix@nayobix.org>
+Date: Thu, 27 Oct 2016 11:33:19 +0300
+Subject: [PATCH 1/2] Headless android - frameworks/native [1/2]
+
+---
+ cmds/servicemanager/servicemanager.rc           |  2 +-
+ libs/gui/BufferQueueCore.cpp                    | 15 +++++++++++++--
+ services/surfaceflinger/SurfaceFlinger_hwc1.cpp |  4 ++--
+ services/surfaceflinger/surfaceflinger.rc       | 12 ++++++------
+ 4 files changed, 22 insertions(+), 11 deletions(-)
+
+diff --git a/cmds/servicemanager/servicemanager.rc b/cmds/servicemanager/servicemanager.rc
+index aee7bd8..5610d05 100644
+--- a/cmds/servicemanager/servicemanager.rc
++++ b/cmds/servicemanager/servicemanager.rc
+@@ -7,7 +7,7 @@ service servicemanager /system/bin/servicemanager
+     onrestart restart zygote
+     onrestart restart audioserver
+     onrestart restart media
+-    onrestart restart surfaceflinger
++#   onrestart restart surfaceflinger
+     onrestart restart inputflinger
+     onrestart restart drm
+     onrestart restart cameraserver
+diff --git a/libs/gui/BufferQueueCore.cpp b/libs/gui/BufferQueueCore.cpp
+index 569b8f9..0dd1f10 100644
+--- a/libs/gui/BufferQueueCore.cpp
++++ b/libs/gui/BufferQueueCore.cpp
+@@ -30,12 +30,15 @@
+ 
+ #include <gui/BufferItem.h>
+ #include <gui/BufferQueueCore.h>
++#include <gui/GraphicBufferAlloc.h>
+ #include <gui/IConsumerListener.h>
+ #include <gui/IGraphicBufferAlloc.h>
+ #include <gui/IProducerListener.h>
+ #include <gui/ISurfaceComposer.h>
+ #include <private/gui/ComposerService.h>
+ 
++#include <cutils/properties.h>
++
+ namespace android {
+ 
+ static String8 getUniqueName() {
+@@ -92,8 +95,16 @@ BufferQueueCore::BufferQueueCore(const sp<IGraphicBufferAlloc>& allocator) :
+     mUniqueId(getUniqueId())
+ {
+     if (allocator == NULL) {
+-        sp<ISurfaceComposer> composer(ComposerService::getComposerService());
+-        mAllocator = composer->createGraphicBufferAlloc();
++        // Run time check for headless, where we also allocate in-process.
++	char value[PROPERTY_VALUE_MAX];
++	property_get("ro.config.headless", value, "0");
++	if (atoi(value) == 1) {
++            mAllocator = new GraphicBufferAlloc();
++        } else {
++            sp<ISurfaceComposer> composer(ComposerService::getComposerService());
++            mAllocator = composer->createGraphicBufferAlloc();
++        }
++
+         if (mAllocator == NULL) {
+             BQ_LOGE("createGraphicBufferAlloc failed");
+         }
+diff --git a/services/surfaceflinger/SurfaceFlinger_hwc1.cpp b/services/surfaceflinger/SurfaceFlinger_hwc1.cpp
+index 7f3b269..9b34c2f 100644
+--- a/services/surfaceflinger/SurfaceFlinger_hwc1.cpp
++++ b/services/surfaceflinger/SurfaceFlinger_hwc1.cpp
+@@ -204,7 +204,7 @@ void SurfaceFlinger::binderDied(const wp<IBinder>& /* who */)
+     initializeDisplays();
+ 
+     // restart the boot-animation
+-    startBootAnim();
++    //startBootAnim();
+ }
+ 
+ sp<ISurfaceComposerClient> SurfaceFlinger::createConnection()
+@@ -528,7 +528,7 @@ void SurfaceFlinger::init() {
+     initializeDisplays();
+ 
+     // start boot animation
+-    startBootAnim();
++    //startBootAnim();
+ }
+ 
+ int32_t SurfaceFlinger::allocateHwcDisplayId(DisplayDevice::DisplayType type) {
+diff --git a/services/surfaceflinger/surfaceflinger.rc b/services/surfaceflinger/surfaceflinger.rc
+index 2b4ea2a..44530c9 100644
+--- a/services/surfaceflinger/surfaceflinger.rc
++++ b/services/surfaceflinger/surfaceflinger.rc
+@@ -1,6 +1,6 @@
+-service surfaceflinger /system/bin/surfaceflinger
+-    class core
+-    user system
+-    group graphics drmrpc readproc
+-    onrestart restart zygote
+-    writepid /sys/fs/cgroup/stune/foreground/tasks
++#service surfaceflinger /system/bin/surfaceflinger
++#    class core
++#    user system
++#    group graphics drmrpc readproc
++#    onrestart restart zygote
++#    writepid /sys/fs/cgroup/stune/foreground/tasks
+-- 
+2.7.4
+
