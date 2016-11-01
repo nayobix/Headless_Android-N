@@ -1,12 +1,15 @@
-Headless Android Device (Based on branch: android-7.0.0_r5)
-====================================================================
+Headless/Displayless Android-N
+==============================
+
+(Based on branch: android-7.0.0_r5)
+
 
 Previous versions of Android had the prop/option for running without display 
 (headless). But since JellyBean (e63f6f7c8d0094bdea3fe031a178490b273162cd) 
 this prop is obsolete.
 
 So inspired from commit e63f6f7c8d0094bdea3fe031a178490b273162cd and according
-to the new android version, this is intended to be non-production ready headless
+to the new android version N (Nougat), this is intended to be non-production ready headless
 android.
 
 
@@ -28,9 +31,7 @@ Cons:
 
 Tested on Nexus 6P (angler) (android-7.0.0_r5)
 
-You should define:
-
-setprop ro.config.headless 1
+You should define: setprop ro.config.headless 1
 
 in [system|default].prop or in some .rc file
 
